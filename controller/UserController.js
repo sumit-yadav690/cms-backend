@@ -34,9 +34,15 @@ exports.loginUser = async (req, res) => {
 
     // --- Not found? Create new user ---
     if (!user) {
+      const referralCode = Math.random()
+        .toString(36)
+        .substring(2, 10)
+        .toUpperCase();
+
       user = new User({
         email,
         phone: phoneDigits,
+        referralCode,
         role: "user", // client se role MAT lo
       });
 

@@ -2,169 +2,146 @@ const Student = require("../model/student.model");
 const User = require("../model/user.model");
 const Settings = require("../model/setting.model");
 
+const clampSeconds = (ms) => Math.max(0, Math.floor(ms / 1000));
+
 exports.addStudent = async (req, res) => {
   try {
     const {
-      studentName,
-      dob,
-      gender,
-      phone,
-      email,
-      city,
-      state,
-      courseApplied,
-      admissionYear,
-      college,
+      studentName, dob, gender, phone, email,
+      city, state, courseApplied, admissionYear, college,
     } = req.body;
 
-    // ---------------- VALIDATION ---------------- //
-
+    // ---------- BASIC VALIDATIONS (unchanged/short) ----------
     if (
-      !studentName ||
-      !dob ||
-      !gender ||
-      !phone ||
-      !email ||
-      !city ||
-      !state ||
-      !courseApplied ||
-      !admissionYear ||
-      !college
-    ) {
-      return res.status(400).json({ message: "All fields are required" });
-    }
+      !studentName || !dob || !gender || !phone || !email ||
+      !city || !state || !courseApplied || !admissionYear || !college
+    ) return res.status(400).json({ message: "All fields are required" });
 
     const nameRegex = /^[A-Za-z\s]+$/;
-    if (!nameRegex.test(studentName))
-      return res
-        .status(400)
-        .json({ message: "Student name must contain only letters" });
-    if (!nameRegex.test(city))
-      return res
-        .status(400)
-        .json({ message: "City must contain only letters" });
-    if (!nameRegex.test(state))
-      return res
-        .status(400)
-        .json({ message: "State must contain only letters" });
-    if (!nameRegex.test(college))
-      return res
-        .status(400)
-        .json({ message: "College name must contain only letters" });
-
-    if (!/^\d{10}$/.test(phone))
-      return res
-        .status(400)
-        .json({ message: "Phone number must be exactly 10 digits" });
+    if (!nameRegex.test(studentName)) return res.status(400).json({ message: "Student name must contain only letters" });
+    if (!nameRegex.test(city))        return res.status(400).json({ message: "City must contain only letters" });
+    if (!nameRegex.test(state))       return res.status(400).json({ message: "State must contain only letters" });
+    if (!nameRegex.test(college))     return res.status(400).json({ message: "College name must contain only letters" });
+    if (!/^\d{10}$/.test(phone))      return res.status(400).json({ message: "Phone must be exactly 10 digits" });
 
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email))
-      return res.status(400).json({ message: "Invalid email format" });
+    if (!emailRegex.test(email))      return res.status(400).json({ message: "Invalid email format" });
 
     const dobDate = new Date(dob);
-    const nowDate = new Date();
-    if (dobDate > nowDate)
-      return res
-        .status(400)
-        .json({ message: "Date of birth cannot be in the future" });
+    const now = new Date();
+    if (dobDate > now)                return res.status(400).json({ message: "DOB cannot be in the future" });
 
     const allowedGenders = ["Male", "Female", "Other"];
-    if (!allowedGenders.includes(gender))
-      return res.status(400).json({ message: "Invalid gender value" });
+    if (!allowedGenders.includes(gender)) return res.status(400).json({ message: "Invalid gender value" });
 
-    if (!/^\d{4}$/.test(admissionYear))
-      return res
-        .status(400)
-        .json({ message: "Admission year must be a valid 4-digit year" });
-
-    const admissionYearNum = parseInt(admissionYear);
-    const currentYear = nowDate.getFullYear();
+    if (!/^\d{4}$/.test(admissionYear)) return res.status(400).json({ message: "Admission year must be 4 digits" });
+    const currentYear = now.getFullYear();
+    const admissionYearNum = parseInt(admissionYear, 10);
     if (admissionYearNum < 1900 || admissionYearNum > currentYear)
-      return res.status(400).json({
-        message: "Admission year must be between 1900 and current year",
-      });
+      return res.status(400).json({ message: "Admission year must be between 1900 and current year" });
 
-    // -------------------------------------------------- //
-
+    // ---------- USER & SETTINGS ----------
     const userId = req.user.id;
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    const settings = (await Settings.findOne()) || {
-      rewardPerStudent: 2,
-      cooldownSeconds: 45,
-      maxStudentsBeforeBlock: 100,
-      blockDurationMinutes: 45,
+    const dbSettings = await Settings.findOne();
+    const settings = {
+      rewardPerStudent: Number(dbSettings?.rewardPerStudent ?? 2),
+      cooldownSeconds: Number(dbSettings?.cooldownSeconds ?? 45),
+      maxStudentsBeforeBlock: Number(dbSettings?.maxStudentsBeforeBlock ?? 100),   // dynamic threshold
+      blockDurationMinutes: Number(dbSettings?.blockDurationMinutes ?? 45),        // dynamic duration
     };
 
-    const now = new Date();
+    // ---------- AUTO-UNBLOCK if block expired ----------
+    if (user.blockUntil && now >= new Date(user.blockUntil)) {
+      user.blockUntil = null;
+      await user.save(); // persist clear
+    }
 
-    // ❌ Block check
-    if (user.blockUntil && now < user.blockUntil) {
+    // ---------- ACTIVE BLOCK? return 403 with remaining time ----------
+    if (user.blockUntil) {
+      const until = new Date(user.blockUntil);
       return res.status(403).json({
-        message: `You are blocked until ${user.blockUntil}`,
-        blockedUntil: user.blockUntil,
+        message: `You are blocked until ${until.toISOString()}`,
+        blockedUntil: until.toISOString(),
+        remainingBlockSeconds: clampSeconds(until - now),
+        studentCount: Number(user.studentCount ?? 0),
+        threshold: settings.maxStudentsBeforeBlock,
       });
     }
 
-    // ⏳ Cooldown check
-    if (
-      user.lastStudentAddedAt &&
-      now - user.lastStudentAddedAt < settings.cooldownSeconds * 1000
-    ) {
-      const remaining =
-        settings.cooldownSeconds -
-        Math.floor((now - user.lastStudentAddedAt) / 1000);
-
-      return res.status(429).json({
-        message: `Please wait ${remaining} seconds before adding another student`,
-        remainingTime: remaining,
-      });
+    // ---------- COOLDOWN? return 429 with timing ----------
+    if (user.lastStudentAddedAt) {
+      const last = new Date(user.lastStudentAddedAt);
+      const diffMs = now - last;
+      const waitMs = settings.cooldownSeconds * 1000 - diffMs;
+      if (waitMs > 0) {
+        return res.status(429).json({
+          message: `Please wait ${clampSeconds(waitMs)} seconds before adding another student`,
+          remainingCooldownSeconds: clampSeconds(waitMs),
+          nextEligibleAt: new Date(last.getTime() + settings.cooldownSeconds * 1000).toISOString(),
+        });
+      }
     }
 
-    // ✅ Student Save
+    // ---------- SAVE STUDENT ----------
     const student = new Student({
       studentName,
       dob: dobDate,
-      gender,
-      phone,
-      email,
-      city,
-      state,
+      gender, phone, email, city, state,
       courseApplied,
       admissionYear: admissionYearNum,
       college,
       createdBy: user._id,
     });
-
     await student.save();
 
-    // 🎯 Reward + counter update
-    user.reward += settings.rewardPerStudent;
+    // ---------- UPDATE COUNTERS ----------
+    user.reward = Number(user.reward ?? 0) + settings.rewardPerStudent;
+    user.studentCount = Number(user.studentCount ?? 0) + 1;
     user.lastStudentAddedAt = now;
-    user.studentCount += 1;
 
-    // 🔒 Har N students par block lagao
+    // ---------- COUNT-BASED BLOCK (allow-then-block) ----------
+    let willBlock = false;
+    let blockedUntilIso = null;
+    let remainingBlockSeconds = 0;
+
     if (
       user.studentCount > 0 &&
       user.studentCount % settings.maxStudentsBeforeBlock === 0
     ) {
-      const blockDurationMs = settings.blockDurationMinutes * 60 * 1000;
-      user.blockUntil = new Date(now.getTime() + blockDurationMs);
+      const blockMs = settings.blockDurationMinutes * 60 * 1000;
+      const until = new Date(now.getTime() + blockMs);
+      user.blockUntil = until;
+
+      willBlock = true;
+      blockedUntilIso = until.toISOString();
+      remainingBlockSeconds = clampSeconds(blockMs);
     }
 
     await user.save();
 
+    // ---------- SUCCESS RESPONSE (returns timing if just blocked) ----------
     return res.json({
       message: "Student added successfully",
       student,
-      reward: user.reward,
-      studentCount: user.studentCount,
-      blockedUntil: user.blockUntil || null,
+      reward: Number(user.reward ?? 0),
+      studentCount: Number(user.studentCount ?? 0), // never reset
+      cooldownSeconds: settings.cooldownSeconds,
+      nextEligibleAt: new Date(now.getTime() + settings.cooldownSeconds * 1000).toISOString(),
+
+      // if threshold hit on this request:
+      willBlock,
+      blockedUntil: blockedUntilIso,                // ISO string or null
+      remainingBlockSeconds,                        // seconds or 0
+
+      // for UI/reference:
+      threshold: settings.maxStudentsBeforeBlock,
+      rewardPerStudent: settings.rewardPerStudent,
+      blockDurationMinutes: settings.blockDurationMinutes,
     });
   } catch (error) {
-    return res
-      .status(500)
-      .json({ message: "Server error", error: error.message });
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
